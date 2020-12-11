@@ -24,6 +24,7 @@ public class Storage {
 		Vector<String> lines = new Vector<String>();
 		while ((line = bfr.readLine()) != null)
 			lines.add(line);
+		bfr.close();
 
 		InetAddress serverIP = InetAddress.getByName(lines.get(0));
 		InetAddress storageIP_01 = InetAddress.getByName(lines.get(2));
@@ -34,8 +35,10 @@ public class Storage {
 
 		StartStorage storage01 = new StartStorage(serverIP, serverPort, storageIP_01, storagePort_01);
 		storage01.start();
+		storage01.setName("STORAGE_01");
 		StartStorage storage02 = new StartStorage(serverIP, serverPort, storageIP_02, storagePort_02);
 		storage02.start();
+		storage02.setName("STORAGE_02");
 
 	}
 
@@ -63,9 +66,6 @@ public class Storage {
 			Socket s;
 			try {
 				s = new Socket(serverIP, serverPort, storageIP, storagePort);
-
-				this.setName("STORAGE" + storageIP.toString() + ":" + storagePort);
-
 				System.out.println("A new server is connected : " + s);
 
 				// obtaining input and out streams

@@ -94,10 +94,13 @@ class ServerImplementation {
 		listUsers();
 
 		clientListener.start();
+		clientListener.setName("ClientListenerThread");
 		storageListener.start();
+		storageListener.setName("StorageListenerThread");
 	}
 	
 	class ClientListener extends Thread {
+		
 		public ClientListener() {
 
 		}
@@ -107,35 +110,24 @@ class ServerImplementation {
 			try {
 //				testAESEncryptionAndDecryption();
 
-				// server is listening on port 33333 and 33335
+				// server is listening on port 33333
 				ServerSocket ssc = new ServerSocket(33333);
 
 				// running infinite loop for getting client request
 				boolean loop = true;
 				while (loop) {
-					Socket socketC = null;
+					Socket socketClient = null;
 
 					try {
+						socketClient = ssc.accept();
 
-						socketC = ssc.accept();
-
-						byte[] ccADDR = socketC.getInetAddress().getAddress();
-
-						String nameC = 
-										String.valueOf(ccADDR[0]) + "_" + 
-										String.valueOf(ccADDR[1]) + "_" + 
-										String.valueOf(ccADDR[2]) + "_" + 
-										String.valueOf(ccADDR[3]) + "_" + 
-										socketC.getPort();
-
-						if (socketC != null) {
-							System.out.println("A new client is trying to connect : " + socketC);
-						}
-						
+						if (socketClient != null) {
+							System.out.println("A new client is trying to connect : " + socketClient);
+						}						
 												
 						// obtaining input and out streams
-						DataInputStream disC = new DataInputStream(socketC.getInputStream());
-						DataOutputStream dosC = new DataOutputStream(socketC.getOutputStream());
+						DataInputStream disC = new DataInputStream(socketClient.getInputStream());
+						DataOutputStream dosC = new DataOutputStream(socketClient.getOutputStream());
 
 						// Starts key exchange
 						byte[] SPubK = keyPair.getPublic().getEncoded();
@@ -146,57 +138,38 @@ class ServerImplementation {
 						// save the decryptedSymmetricKey for the connected client
 						SymmetricCryptoManager sCryptoManager = new SymmetricCryptoManager(decryptedSymmetricKey);
 						
-						// Test receiving encrypted data
-					    byte[] testBytes = Base64.getDecoder().decode(disC.readUTF());
-					    String msg = new String(sCryptoManager.decryptData(testBytes));
-					    System.out.println(msg);
+//						// Test receiving encrypted data
+//					    byte[] testBytes = Base64.getDecoder().decode(disC.readUTF());
+//					    String msg = new String(sCryptoManager.decryptData(testBytes));
+//					    System.out.println(msg);
 						
-//						if(KeyExchange(socketC, disC, dosC)) {
-//							//socketC.close();
-//						}
-						mapDOSClient.put(getIpSocket(socketC), dosC);
+						mapDOSClient.put(getIpSocket(socketClient), dosC);
 
-						// System.out.println("Assigning new thread client " + nameC);
-
-						String ipClient = socketC.getInetAddress().toString().substring(1);
-						Thread tC = new ClientHandler(disC, ipClient, socketC);
+						Thread tC = new ClientHandler(socketClient, sCryptoManager);
 
 						//	VERIFICAR LISTA DE USARIOS 
 						// 		CASO NÃO ESTEJA, ADICIONAR CLIENT NA LISTA DE USUARIOS
 						// 		CRIAR DIRETORIOS PARA O CLIENT NOS STORAGES
-						String client = socketC.getInetAddress().getHostName() + "_" + socketC.getPort();
+						String client = socketClient.getInetAddress().getHostName() + "_" + socketClient.getPort();
 						listUsers();
 						if (!userExists(client)) {
 							addUserToList(client);
 						}
-						/*	 */	
 						
-
 						// create a new thread object
-						tC.setName(client);
+						tC.setName("CLIENT/"+client);						
 						tC.start();
 
 					} catch (Exception e) {
 						e.printStackTrace();
 						System.out.println("Socket Closed");
-						socketC.close();
+						socketClient.close();
 					}
 				}
 				ssc.close();
 			} catch (IOException e) {
 				e.printStackTrace();
 			}
-		}
-
-		private boolean KeyExchange(Socket connection, DataInputStream in, DataOutputStream out){
-			try {
-				
-//				Mensagem msg = new Mensagem(keyPair.getPublic().getEncoded());
-				out.write(keyPair.getPublic().getEncoded());
-				
-			} catch (IOException e) {
-				e.printStackTrace();		}
-			return false;
 		}
 	}
 
@@ -231,7 +204,7 @@ class ServerImplementation {
 						// System.out.println("Assigning new thread storage " + nameSt);
 						Thread tSt = new StorageHandler(disSt, socketSt);
 
-						tSt.setName(nameSt);
+						tSt.setName("STORAGE/"+nameSt);
 						tSt.start();
 					} catch (Exception e) {
 						e.printStackTrace();
@@ -248,8 +221,10 @@ class ServerImplementation {
 
 // ClientHandler class
 	class ClientHandler extends Thread {
-		final DataInputStream dis;
-		final Socket s;
+		DataOutputStream dos;
+		DataInputStream dis;
+		final Socket connection;
+		final SymmetricCryptoManager sessionKey;
 
 //		final String ipServer;
 //		final String portaServer;
@@ -257,17 +232,25 @@ class ServerImplementation {
 		public String ipClient;
 
 		// Constructor
-		public ClientHandler(DataInputStream dis, String ipClient, Socket _s) {
-			this.dis = dis;
-			this.ipClient = ipClient;
-			this.s = _s;
+		public ClientHandler(Socket connection, SymmetricCryptoManager key) {
+			this.dis = null;
+			this.dos = null;
+			this.sessionKey = key;
+			try {
+				this.dos = new DataOutputStream(connection.getOutputStream());
+				this.dis = new DataInputStream(connection.getInputStream());
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+			this.ipClient = connection.getInetAddress().getHostName();
+			this.connection = connection;
 //			this.ipServer = ipServer;
 //			this.portaServer = portaServer;
 		}
 
 		@Override
 		public void run() {
-			System.out.println("executando run da thread ClientHandler");
 			boolean loop = true;
 			while (loop) {
 				try {
@@ -301,42 +284,17 @@ class ServerImplementation {
 					String ipStorage;
 					Mensagem m;
 					byte[] message;
-					DataOutputStream dos;
-					DataOutputStream stdos;
-					String portaStorage;
+					DataOutputStream storageDataOutput = null;
 					ArrayList<DataOutputStream> dosAll;
 					ArrayList<String> chaves;
 					
 					// Logica
 					switch (mode) {
-//					case RECEBE_ARQ_CLIENT:
-//						// -- UPLOAD: Client (bytes arq) -> Server -> Storage
-//
-//						// Escolha do storage
-//						String[] splitEscolha = escolhaStorageUpload();
-//						String ipStorage = splitEscolha[0];
-//						String portaStorage = splitEscolha[1];
-//
-//						DataOutputStream stdos = null;
-//						stdos = mapDOSStorage.get(ipStorage);
-//
-//						Mensagem m = new Mensagem(ENVIA_ARQ_STORAGE, bUser, bNomeArq, body);
-//						byte[] message = m.getMessage();
-//
-//						m.showMessage();
-//						
-//						System.out.println("writing arq to storage: " + stdos.toString());
-//						stdos.write(m.getMessage());
-//
-//						addArqFile(m.getHeader().getNome(), ipStorage);
-//
-//						// s.close();
-//						break;
 					case RECEBE_ARQ_REP_CLIENT:
 						// -- UPLOAD REPLICADO: Client (bytes arq) -> Server -> Storage
 
-						stdos = null;
-						//stdos = mapDOSStorage.get(ipStorage);
+						storageDataOutput = null;
+						//storageDataOutput = mapDOSStorage.get(ipStorage);
 						//TODO: isso nao era ideal ter nessa parte do codigo?
 						dosAll = new ArrayList<>();
 						chaves = Collections.list( mapDOSStorage.keys() ) ;
@@ -355,9 +313,9 @@ class ServerImplementation {
 						System.out.println("--");
 						
 						for(int i = 0 ; i<dosAll.size();i++) {
-							stdos = dosAll.get(i);
-							System.out.println("writing arq to storage: " + stdos.toString());
-							stdos.write(m.getMessage());
+							storageDataOutput = dosAll.get(i);
+							System.out.println("writing arq to storage: " + storageDataOutput.toString());
+							storageDataOutput.write(m.getMessage());
 							addArqFile(m.getHeader().getNome(), "REP", chaves.get(i));
 						}
 
@@ -369,8 +327,8 @@ class ServerImplementation {
 						// -- UPLOAD: Client (bytes arq) -> Server -> Storage
 
 
-						stdos = null;
-						//stdos = mapDOSStorage.get(ipStorage);
+						storageDataOutput = null;
+						//storageDataOutput = mapDOSStorage.get(ipStorage);
 						//TODO: isso nao era ideal ter nessa parte do codigo?
 						dosAll = new ArrayList<>();
 						chaves = Collections.list( mapDOSStorage.keys() ) ;
@@ -400,9 +358,9 @@ class ServerImplementation {
 							System.out.println(">>");
 							m.showMessage();
 							System.out.println(">>");
-							stdos = dosAll.get(i);
-							System.out.println("writing arq to storage: " + stdos.toString());
-							stdos.write(m.getMessage());
+							storageDataOutput = dosAll.get(i);
+							System.out.println("writing arq to storage: " + storageDataOutput.toString());
+							storageDataOutput.write(m.getMessage());
 							contadorDiv+= body.length/tam;
 							addArqFile(m.getHeader().getNome(), "DIV"+i, chaves.get(i));
 						}
@@ -421,25 +379,24 @@ class ServerImplementation {
 							String[] ipsAllStorages = Collections.list(mapDOSStorage.keys()).toArray(new String[0]);
 							ipStorage = splitEscolha[0];
 
-							stdos = null;
 							mapClientArq.put(m.getHeader().getNome(), this.ipClient);
-							System.out.println("writing req to storage: " + stdos.toString());
 							if ( isDiv(m.getHeader().getNome()) ) {
 								for(int i=0;i<ipsAllStorages.length;i++) {
-									stdos = mapDOSStorage.get(ipsAllStorages[i]);
-									stdos.write(message);	
+									storageDataOutput = mapDOSStorage.get(ipsAllStorages[i]);
+									storageDataOutput.write(message);	
 								}
 							}else {
-								stdos = mapDOSStorage.get(ipStorage);
-								stdos.write(message);
+								storageDataOutput = mapDOSStorage.get(ipStorage);
+								storageDataOutput.write(message);
 							}
+							//storageDataOutput.close();
 							break;
 						}
 					}
 				} catch (SocketException se) {
 					se.printStackTrace();
 					try {
-						this.s.close();
+						this.connection.close();
 						loop = false;
 						break;
 					} catch (IOException e) {
