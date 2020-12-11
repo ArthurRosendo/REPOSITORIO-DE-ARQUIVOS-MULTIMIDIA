@@ -3,9 +3,11 @@ package server;
 import java.io.*;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Hashtable;
+import java.util.Vector;
 import java.util.concurrent.Semaphore;
 
 import crypto.AsymmetricCryptoManager;
@@ -27,6 +29,10 @@ class ServerImplementation {
 	public static final byte ENVIA_ARQ_STORAGE = (byte) 0x01;
 	public static final byte ENVIA_ARQ_CLIENT = (byte) 0x03;
 	public static final byte ENVIA_REQ_STORAGE = (byte) 0x05;
+	public static String PATH_STORAGE_01 = "db\\STORAGE_01\\";
+	public static String PATH_STORAGE_02 = "db\\STORAGE_02\\";
+	public static String PATH_REP = "\\REPLICADO";
+	public static String PATH_PAR = "\\PARTICIONADO";
 
 	//TODO: semaforos
 	public static final String nomeArqPermissao = "arqPermissao.txt";
@@ -36,7 +42,11 @@ class ServerImplementation {
 	public static final Semaphore semaforoUser = new Semaphore(1);
 
 	public static final String nomeArqFiles = "arqFiles.txt";
+
 	public static final Semaphore semaforoFiles = new Semaphore(1);
+
+	private Vector<String> users = new Vector<String>();
+	private Vector<Key> usersKeys = new Vector<Key>();
 
 	// TODO: Usar ConcurrentHashMap inves de HashTable? HashTable possui metodos
 	// sincronizados
@@ -48,20 +58,49 @@ class ServerImplementation {
 	public static Hashtable<String, String> mapClientArq = new Hashtable<>();
 	
 	public static Hashtable<String, Hashtable<Integer, Byte[]>> mapaReconstrucaoDiv = new Hashtable<>();
+	
+	public KeyPair keyPair;
 
 	public ServerImplementation(String[] args) throws IOException {
 		this.main(args);
+	}
+	
+	public static String getIpSocket(Socket socket) {
+		SocketAddress socketAddress = socket.getRemoteSocketAddress();
+
+		if (socketAddress instanceof InetSocketAddress) {
+			InetAddress inetAddress = ((InetSocketAddress) socketAddress).getAddress();
+			int port = socket.getPort();
+			if (inetAddress instanceof Inet4Address) {
+				return inetAddress.toString().substring(1) +":"+ port;
+			} else if (inetAddress instanceof Inet6Address) {
+				return inetAddress.toString().substring(1) +":"+ port;
+			} else {
+				System.err.println("Nao eh IP.");
+				return null;
+			}
+		} else {
+			System.err.println("Nao eh um socket IP.");
+			return null;
+		}
 	}
 
 	public void main(String[] args) throws IOException {
 		ClientListener clientListener = new ClientListener();
 		StorageListener storageListener = new StorageListener();
+		
+		generateKeyPair();
+	
+		listUsers();
 
 		clientListener.start();
+		clientListener.setName("ClientListenerThread");
 		storageListener.start();
+		storageListener.setName("StorageListenerThread");
 	}
-
+	
 	class ClientListener extends Thread {
+		
 		public ClientListener() {
 
 		}
@@ -69,48 +108,62 @@ class ServerImplementation {
 		@Override
 		public void run() {
 			try {
-				// testAESEncryptionAndDecryption();
+//				testAESEncryptionAndDecryption();
 
-				// server is listening on port 33333 and 33335
+				// server is listening on port 33333
 				ServerSocket ssc = new ServerSocket(33333);
 
 				// running infinite loop for getting client request
 				boolean loop = true;
 				while (loop) {
-					Socket socketC = null;
+					Socket socketClient = null;
 
 					try {
+						socketClient = ssc.accept();
 
-						socketC = ssc.accept();
-
-						byte[] ccADDR = socketC.getInetAddress().getAddress();
-
-						String nameC = String.valueOf(ccADDR[0]) + "." + String.valueOf(ccADDR[1]) + "."
-								+ String.valueOf(ccADDR[2]) + "." + String.valueOf(ccADDR[3]) + ":" + socketC.getPort();
-
-						if (socketC != null) {
-							System.out.println("A new client is connected : " + socketC);
-						}
-
+						if (socketClient != null) {
+							System.out.println("A new client is trying to connect : " + socketClient);
+						}						
+												
 						// obtaining input and out streams
-						DataInputStream disC = new DataInputStream(socketC.getInputStream());
-						DataOutputStream dosC = new DataOutputStream(socketC.getOutputStream());
+						DataInputStream disC = new DataInputStream(socketClient.getInputStream());
+						DataOutputStream dosC = new DataOutputStream(socketClient.getOutputStream());
 
-						mapDOSClient.put(getIpSocket(socketC), dosC);
+						// Starts key exchange
+						byte[] SPubK = keyPair.getPublic().getEncoded();
+						dosC.writeUTF(Base64.getEncoder().encodeToString(SPubK));
+						byte[] ClientEncodedKey = Base64.getDecoder().decode(disC.readUTF());
+						byte[] decryptedSymmetricKey = AsymmetricCryptoManager.decryptData(ClientEncodedKey, keyPair.getPrivate());
+						
+						// save the decryptedSymmetricKey for the connected client
+						SymmetricCryptoManager sCryptoManager = new SymmetricCryptoManager(decryptedSymmetricKey);
+						
+//						// Test receiving encrypted data
+//					    byte[] testBytes = Base64.getDecoder().decode(disC.readUTF());
+//					    String msg = new String(sCryptoManager.decryptData(testBytes));
+//					    System.out.println(msg);
+						
+						mapDOSClient.put(getIpSocket(socketClient), dosC);
 
-						// System.out.println("Assigning new thread client " + nameC);
+						Thread tC = new ClientHandler(socketClient, sCryptoManager);
 
-						String ipClient = socketC.getInetAddress().toString().substring(1);
-						Thread tC = new ClientHandler(disC, ipClient, socketC);
-
+						//	VERIFICAR LISTA DE USARIOS 
+						// 		CASO NÃO ESTEJA, ADICIONAR CLIENT NA LISTA DE USUARIOS
+						// 		CRIAR DIRETORIOS PARA O CLIENT NOS STORAGES
+						String client = socketClient.getInetAddress().getHostName() + "_" + socketClient.getPort();
+						listUsers();
+						if (!userExists(client)) {
+							addUserToList(client);
+						}
+						
 						// create a new thread object
-						tC.setName(nameC);
+						tC.setName("CLIENT/"+client);						
 						tC.start();
 
 					} catch (Exception e) {
 						e.printStackTrace();
 						System.out.println("Socket Closed");
-						socketC.close();
+						socketClient.close();
 					}
 				}
 				ssc.close();
@@ -151,7 +204,7 @@ class ServerImplementation {
 						// System.out.println("Assigning new thread storage " + nameSt);
 						Thread tSt = new StorageHandler(disSt, socketSt);
 
-						tSt.setName(nameSt);
+						tSt.setName("STORAGE/"+nameSt);
 						tSt.start();
 					} catch (Exception e) {
 						e.printStackTrace();
@@ -168,8 +221,10 @@ class ServerImplementation {
 
 // ClientHandler class
 	class ClientHandler extends Thread {
-		final DataInputStream dis;
-		final Socket s;
+		DataOutputStream dos;
+		DataInputStream dis;
+		final Socket connection;
+		final SymmetricCryptoManager sessionKey;
 
 //		final String ipServer;
 //		final String portaServer;
@@ -177,17 +232,25 @@ class ServerImplementation {
 		public String ipClient;
 
 		// Constructor
-		public ClientHandler(DataInputStream dis, String ipClient, Socket _s) {
-			this.dis = dis;
-			this.ipClient = ipClient;
-			this.s = _s;
+		public ClientHandler(Socket connection, SymmetricCryptoManager key) {
+			this.dis = null;
+			this.dos = null;
+			this.sessionKey = key;
+			try {
+				this.dos = new DataOutputStream(connection.getOutputStream());
+				this.dis = new DataInputStream(connection.getInputStream());
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+			this.ipClient = connection.getInetAddress().getHostName();
+			this.connection = connection;
 //			this.ipServer = ipServer;
 //			this.portaServer = portaServer;
 		}
 
 		@Override
 		public void run() {
-			// System.out.println("executando run da thread ClientHandler");
 			boolean loop = true;
 			while (loop) {
 				try {
@@ -214,55 +277,33 @@ class ServerImplementation {
 					byte[] bUser = msg.getHeader().getBUser();
 					long user = bytesToLong(bUser);
 					byte[] bNomeArq = msg.getHeader().getBNome();
+					String nomeArq = msg.getHeader().getNome();
 					byte[] body = msg.getBody();
 
 					String[] splitEscolha;
 					String ipStorage;
 					Mensagem m;
 					byte[] message;
-					DataOutputStream dos;
-					DataOutputStream stdos;
-					String portaStorage;
+					DataOutputStream storageDataOutput = null;
 					ArrayList<DataOutputStream> dosAll;
 					ArrayList<String> chaves;
 					
 					// Logica
 					switch (mode) {
-//					case RECEBE_ARQ_CLIENT:
-//						// -- UPLOAD: Client (bytes arq) -> Server -> Storage
-//
-//						// Escolha do storage
-//						String[] splitEscolha = escolhaStorageUpload();
-//						String ipStorage = splitEscolha[0];
-//						String portaStorage = splitEscolha[1];
-//
-//						DataOutputStream stdos = null;
-//						stdos = mapDOSStorage.get(ipStorage);
-//
-//						Mensagem m = new Mensagem(ENVIA_ARQ_STORAGE, bUser, bNomeArq, body);
-//						byte[] message = m.getMessage();
-//
-//						m.showMessage();
-//						
-//						System.out.println("writing arq to storage: " + stdos.toString());
-//						stdos.write(m.getMessage());
-//
-//						addArqFile(m.getHeader().getNome(), ipStorage);
-//
-//						// s.close();
-//						break;
 					case RECEBE_ARQ_REP_CLIENT:
 						// -- UPLOAD REPLICADO: Client (bytes arq) -> Server -> Storage
 
-						stdos = null;
-						//stdos = mapDOSStorage.get(ipStorage);
+						storageDataOutput = null;
+						//storageDataOutput = mapDOSStorage.get(ipStorage);
 						//TODO: isso nao era ideal ter nessa parte do codigo?
 						dosAll = new ArrayList<>();
 						chaves = Collections.list( mapDOSStorage.keys() ) ;
 						for(int i=0; i<chaves.size();i++) {
 							dosAll.add(mapDOSStorage.get(chaves.get(i)));
 						}
-
+						
+						
+						bNomeArq = ( getIpSocket(s) + "/REPLICADO/"+nomeArq).getBytes(StandardCharsets.UTF_8);
 						m = new Mensagem(ENVIA_ARQ_STORAGE, bUser, bNomeArq, body);
 						message = m.getMessage();
 						
@@ -272,9 +313,9 @@ class ServerImplementation {
 						System.out.println("--");
 						
 						for(int i = 0 ; i<dosAll.size();i++) {
-							stdos = dosAll.get(i);
-							System.out.println("writing arq to storage: " + stdos.toString());
-							stdos.write(m.getMessage());
+							storageDataOutput = dosAll.get(i);
+							System.out.println("writing arq to storage: " + storageDataOutput.toString());
+							storageDataOutput.write(m.getMessage());
 							addArqFile(m.getHeader().getNome(), "REP", chaves.get(i));
 						}
 
@@ -286,8 +327,8 @@ class ServerImplementation {
 						// -- UPLOAD: Client (bytes arq) -> Server -> Storage
 
 
-						stdos = null;
-						//stdos = mapDOSStorage.get(ipStorage);
+						storageDataOutput = null;
+						//storageDataOutput = mapDOSStorage.get(ipStorage);
 						//TODO: isso nao era ideal ter nessa parte do codigo?
 						dosAll = new ArrayList<>();
 						chaves = Collections.list( mapDOSStorage.keys() ) ;
@@ -300,6 +341,7 @@ class ServerImplementation {
 						int contadorDiv = 0;
 						int sizeCopy;
 						
+						bNomeArq = (getIpSocket(s) +"/PARTICIONADO/"+nomeArq).getBytes(StandardCharsets.UTF_8);
 						m = new Mensagem(ENVIA_ARQ_STORAGE, bUser, bNomeArq, new byte[0]);//Somente para uso da permissao
 						addPermissaoClient(m.getHeader().getNome(), user); // Adiciona permissao pro usuario fazer download desse arquivo
 						
@@ -316,9 +358,9 @@ class ServerImplementation {
 							System.out.println(">>");
 							m.showMessage();
 							System.out.println(">>");
-							stdos = dosAll.get(i);
-							System.out.println("writing arq to storage: " + stdos.toString());
-							stdos.write(m.getMessage());
+							storageDataOutput = dosAll.get(i);
+							System.out.println("writing arq to storage: " + storageDataOutput.toString());
+							storageDataOutput.write(m.getMessage());
 							contadorDiv+= body.length/tam;
 							addArqFile(m.getHeader().getNome(), "DIV"+i, chaves.get(i));
 						}
@@ -337,25 +379,24 @@ class ServerImplementation {
 							String[] ipsAllStorages = Collections.list(mapDOSStorage.keys()).toArray(new String[0]);
 							ipStorage = splitEscolha[0];
 
-							stdos = null;
 							mapClientArq.put(m.getHeader().getNome(), this.ipClient);
-							System.out.println("writing req to storage: " + stdos.toString());
 							if ( isDiv(m.getHeader().getNome()) ) {
 								for(int i=0;i<ipsAllStorages.length;i++) {
-									stdos = mapDOSStorage.get(ipsAllStorages[i]);
-									stdos.write(message);	
+									storageDataOutput = mapDOSStorage.get(ipsAllStorages[i]);
+									storageDataOutput.write(message);	
 								}
 							}else {
-								stdos = mapDOSStorage.get(ipStorage);
-								stdos.write(message);
+								storageDataOutput = mapDOSStorage.get(ipStorage);
+								storageDataOutput.write(message);
 							}
+							//storageDataOutput.close();
 							break;
 						}
 					}
 				} catch (SocketException se) {
 					se.printStackTrace();
 					try {
-						this.s.close();
+						this.connection.close();
 						loop = false;
 						break;
 					} catch (IOException e) {
@@ -364,6 +405,7 @@ class ServerImplementation {
 				} catch (IOException e) {
 					e.printStackTrace();
 				}
+				
 			} // Fim do while
 		}// Fim do metodo run
 		
@@ -699,7 +741,6 @@ class ServerImplementation {
 	}// Fim de storage handler
 
 	// ======================== METODOS de ServerImplementation=============================
-
 	public Boolean userTemAcesso(long user, String arq) {
 		boolean ok = false;
 
@@ -744,6 +785,40 @@ class ServerImplementation {
 		return ok;
 	}
 
+	public boolean userExists(String client) {
+		for(String user : users)
+			if(user.compareTo(client) == 0) return true;
+			
+		return false;
+	}
+
+	private void listUsers() throws IOException {
+		BufferedReader bufferFile = new BufferedReader(new FileReader("src/server/clients.txt"));
+		String line;
+		while ((line = bufferFile.readLine()) != null)
+			users.add(line);
+		bufferFile.close();
+	}
+	
+	private void addUserToList(String user) throws IOException {
+		BufferedWriter file = new BufferedWriter(new FileWriter("src/server/clients.txt", true));
+		if(!userExists(user)) {
+			users.add(user);
+		}
+		file.append(user + "\n");
+		file.close();
+
+		
+		new File(PATH_STORAGE_01 + user + PATH_REP).mkdirs();
+		new File(PATH_STORAGE_01 + user + PATH_PAR).mkdirs();
+		new File(PATH_STORAGE_02 + user + PATH_REP).mkdirs();
+		new File(PATH_STORAGE_02 + user + PATH_PAR).mkdirs();
+	}
+
+	private void generateKeyPair() {
+		keyPair = AsymmetricCryptoManager.generateKeyPair();
+	}
+	
 	private static void testAESEncryptionAndDecryption() {
 		try {
 
@@ -763,6 +838,9 @@ class ServerImplementation {
 			// Server decode symmetric key
 			byte[] decryptedSymmetricKey = AsymmetricCryptoManager.decryptData(encryptedSymmetricKey,
 					keyPair.getPrivate());
+			
+			System.out.println(encodedKey.length);
+			System.out.println(decryptedSymmetricKey.length);
 
 			SymmetricCryptoManager serverManager = new SymmetricCryptoManager(decryptedSymmetricKey);
 
@@ -782,25 +860,7 @@ class ServerImplementation {
 		}
 	}
 
-	public static String getIpSocket(Socket socket) {
-		SocketAddress socketAddress = socket.getRemoteSocketAddress();
 
-		if (socketAddress instanceof InetSocketAddress) {
-			InetAddress inetAddress = ((InetSocketAddress) socketAddress).getAddress();
-			int port = socket.getPort();
-			if (inetAddress instanceof Inet4Address) {
-				return inetAddress.toString().substring(1) +":"+ port;
-			} else if (inetAddress instanceof Inet6Address) {
-				return inetAddress.toString().substring(1) +":"+ port;
-			} else {
-				System.err.println("Nao eh IP.");
-				return null;
-			}
-		} else {
-			System.err.println("Nao eh um socket IP.");
-			return null;
-		}
-	}
 
 	public static byte[] longToBytes(long x) {
 		ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES);
